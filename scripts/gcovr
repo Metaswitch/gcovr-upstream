@@ -42,12 +42,17 @@ from optparse import OptionParser
 from string import Template
 from os.path import normpath
 
-__version__ = "2.5-prerelease"
-src_revision = "$Revision: 2823 $"
+__version__ = "2.5-prerelease-dirty"
+src_revision = "$Revision: 2823+ $"
 gcov_cmd = "gcov"
 
 output_re = re.compile("[Cc]reating [`'](.*)'$")
 source_re = re.compile("cannot open (source|graph) file")
+
+# Exclusion markers are the ones lcov uses; see geninfo.1
+exclusion_line_str  = "LCOV_EXCL_LINE"
+exclusion_start_str = "LCOV_EXCL_START"
+exclusion_stop_str  = "LCOV_EXCL_STOP"
 
 def version_str():
     ans = __version__
@@ -99,7 +104,7 @@ class CoverageData(object):
 
             tmp.sort()
             return ",".join([str(x) for x in tmp]) or ""
-        
+
         tmp = list(self.uncovered)
         if len(tmp) == 0:
             return ""
@@ -119,7 +124,7 @@ class CoverageData(object):
                        == item - last - 1:
                     last = item
                     continue
-                
+
                 if first==last:
                     ranges.append(str(first))
                 else:
@@ -143,7 +148,7 @@ class CoverageData(object):
         else:
             total = len(self.all_lines)
             cover = len(self.covered)
-            
+
         percent = total and str(int(100.0*cover/total)) or "--"
         return (total, cover, percent)
 
@@ -383,33 +388,53 @@ def process_gcov_data(file, covdata, options):
     branches  = {}
     #first_record=True
     lineno = 0
+    excluding = False
+    excludingline = False
     for line in INPUT:
         segments=line.split(":",2)
         tmp = segments[0].strip()
         if len(segments) > 1:
             try:
                 lineno = int(segments[1].strip())
+                # We have a new source line: check
+                # for exclusions.  We use the lcov semantics (see geninfo.1):
+                # the start line is included but the stop line is excluded.
+                if options.exclude_lines and len(segments) > 2:
+                    code = segments[2]
+                    if exclusion_start_str in code:
+                        excluding = True
+                    elif exclusion_stop_str in code:
+                        excluding = False
+
+                    if exclusion_line_str in code:
+                        excludingline = True
+                    else:
+                        excludingline = excluding
             except:
                 pass # keep previous line number!
-            
+
         if tmp[0] == '#':
-            uncovered.add( lineno )
+            if not excludingline:
+                uncovered.add( lineno )
         elif tmp[0] in "0123456789":
-            covered[lineno] = int(segments[0].strip())
+            if not excludingline:
+                covered[lineno] = int(segments[0].strip())
         elif tmp[0] == '-':
-            # remember certain non-executed lines
-            code = segments[2].strip()
-            if len(code) == 0 or code == "{" or code == "}" or \
-               code.startswith("//") or code == 'else':
-                noncode.add( lineno )
+            if not excludingline:
+                # remember certain non-executed lines
+                code = segments[2].strip()
+                if len(code) == 0 or code == "{" or code == "}" or \
+                        code.startswith("//") or code == 'else':
+                    noncode.add( lineno )
         elif tmp.startswith('branch'):
-            fields = line.split()
-            try:
-                count = int(fields[3])
-                branches.setdefault(lineno, {})[int(fields[1])] = count
-            except:
-                # We ignore branches that were "never executed"
-                pass
+            if not excludingline:
+                fields = line.split()
+                try:
+                    count = int(fields[3])
+                    branches.setdefault(lineno, {})[int(fields[1])] = count
+                except:
+                    # We ignore branches that were "never executed"
+                    pass
         elif tmp.startswith('call'):
             pass
         elif tmp.startswith('function'):
@@ -430,6 +455,10 @@ def process_gcov_data(file, covdata, options):
                 "(WARNING) Unrecognized GCOV output: '%s'\n"
                 "\tThis is indicitive of a gcov output parse error.\n"
                 "\tPlease report this to the gcovr developers." % tmp )
+    if excluding:
+        sys.stderr.write(
+            "(WARNING) Still excluding at end of file.\n"
+            "\tPerhaps you omitted a %s marker?\n" % exclusion_stop_str )
     #
     # If the file is already in covdata, then we
     # remove lines that are covered here.  Otherwise,
@@ -518,7 +547,7 @@ def process_datafile(filename, covdata, options):
                 errors.append("ERROR: cannot identify the location where GCC "
                               "was run using --object-directory=%s\n" %
                               options.objdir)
-            # Revert to the normal 
+            # Revert to the normal
             #sys.exit(1)
 
     # no objdir was specified (or it was a parent dir); walk up the dir tree
@@ -531,21 +560,21 @@ def process_datafile(filename, covdata, options):
                 break
 
     cmd = [ gcov_cmd, abs_filename,
-            "--branch-counts", "--branch-probabilities", "--preserve-paths", 
+            "--branch-counts", "--branch-probabilities", "--preserve-paths",
             '--object-directory', dirname ]
 
     # NB: We are lazy English speakers, so we will only parse English output
     env = dict(os.environ)
     env['LC_ALL'] = 'en_US'
-    
+
 
     while len(potential_wd) > 0 and not Done:
         # NB: either len(potential_wd) == 1, or all entires are absolute
         # paths, so we don't have to chdir(starting_dir) at every
         # iteration.
-        os.chdir(potential_wd.pop(0)) 
-        
-        
+        os.chdir(potential_wd.pop(0))
+
+
         #if options.objdir:
         #    cmd.extend(["--object-directory", Template(options.objdir).substitute(filename=filename, head=dirname, tail=base, root=name, ext=ext)])
 
@@ -601,11 +630,11 @@ def process_datafile(filename, covdata, options):
     if options.delete:
         if not abs_filename.endswith('gcno'):
             os.remove(abs_filename)
-        
+
     if not Done:
         sys.stderr.write(
             "(WARNING) GCOV produced the following errors processing %s:\n"
-            "\t   %s" 
+            "\t   %s"
             "\t(gcovr could not infer a working directory that resolved it.)\n"
             % ( filename, "\t   ".join(errors) ) )
 
@@ -679,7 +708,7 @@ def print_xml_report(covdata):
         (total, covered, percent) = covdata[key].coverage()
         lineTotal += total
         lineCovered += covered
-    
+
     impl = xml.dom.minidom.getDOMImplementation()
     docType = impl.createDocumentType(
         "coverage", None,
@@ -721,7 +750,7 @@ def print_xml_report(covdata):
             # the beginning of the string
             dir = f
         (dir, fname) = os.path.split(dir)
-        
+
         package = packages.setdefault(
             dir, [ doc.createElement("package"), {},
                    0, 0, 0, 0 ] )
@@ -763,7 +792,7 @@ def print_xml_report(covdata):
                 conditions = doc.createElement("conditions")
                 conditions.appendChild(cond)
                 l.appendChild(conditions)
-                
+
             lines.appendChild(l)
 
         className = fname.replace('.', '_')
@@ -891,6 +920,11 @@ parser.add_option("--gcov-exclude",
         action="append",
         dest="gcov_exclude",
         default=[])
+parser.add_option("--exclude-lines",
+        help="Exclude marked lines from coverage checking.",
+        action="store_true",
+        dest="exclude_lines",
+        default=False)
 parser.add_option("-r","--root",
         help="Defines the root directory.  This is used to filter the files, and to standardize the output.",
         action="store",
